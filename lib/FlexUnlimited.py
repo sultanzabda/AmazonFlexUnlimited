@@ -1,13 +1,22 @@
-from lib.Offer import Offer
-from lib.Log import Log
-import requests, time, os, sys, json
-from requests.models import Response
+import base64
+import gzip
+import hashlib
+import hmac
+import json
+import secrets
+import sys
+import time
 from datetime import datetime
-from prettytable import PrettyTable
 from urllib.parse import unquote, urlparse, parse_qs
-import base64, hashlib, hmac, gzip, secrets
+
 import pyaes
+import requests
 from pbkdf2 import PBKDF2
+from prettytable import PrettyTable
+from requests.models import Response
+
+from Offer import Offer
+from lib.Log import Log
 
 try:
   from twilio.rest import Client
@@ -19,6 +28,12 @@ APP_VERSION = "303338310"
 DEVICE_NAME = "Le X522"
 MANUFACTURER = "LeMobile"
 OS_VERSION = "LeEco/Le2_NA/le_s2_na:6.0.1/IFXNAOP5801910272S/61:user/release-keys"
+
+
+def __getTwoStepVerificationChallengeUrl(challengeRequest: Response) -> str:
+  verificationChallengeCode: str = challengeRequest.get("response").get("challenge").get("uri").split("?")[1].split("=")[1]
+  return "https://www.amazon.com/ap/challenge?openid.return_to=https://www.amazon.com/ap/maplanding&openid.oa2.code_challenge_method=S256&openid.assoc_handle=amzn_device_ios_us&pageId=amzn_device_ios_light&accountStatusPolicy=P1&openid.claimed_id=http://specs.openid.net/auth/2.0/identifier_select&openid.mode=checkid_setup&openid.identity=http://specs.openid.net/auth/2.0/identifier_select&openid.ns.oa2=http://www.amazon.com/ap/ext/oauth/2&openid.oa2.client_id=device:30324244334531423246314134354635394236443142424234413744443936452341334e5748585451344542435a53&language=en_US&openid.ns.pape=http://specs.openid.net/extensions/pape/1.0&openid.oa2.code_challenge=n76GtDRiGSvq-Bhrez9x0CypsZFB_7eLfEDy_qZtqFk&openid.oa2.scope=device_auth_access&openid.ns=http://specs.openid.net/auth/2.0&openid.pape.max_auth_age=0&openid.oa2.response_type=code" + f"&arb={verificationChallengeCode}"
+
 
 class FlexUnlimited:
   allHeaders = {
@@ -281,6 +296,7 @@ class FlexUnlimited:
         Returns:
         An access token as a string
         """
+    global response
     payload = {
       "requested_extensions": ["device_info", "customer_info"],
       "cookies": {
@@ -308,11 +324,11 @@ class FlexUnlimited:
       "requested_token_type": ["bearer", "mac_dms", "website_cookies"]
     }
     try:
-      response: Response = self.session.post(FlexUnlimited.routes.get("GetAuthToken"),
-                               headers=FlexUnlimited.allHeaders.get("AmazonApiRequest"), json=payload).json()
+      self.session.post(FlexUnlimited.routes.get("GetAuthToken"),
+                        headers=FlexUnlimited.allHeaders.get("AmazonApiRequest"), json=payload).json()
       return response.get("response").get("success").get("tokens").get("bearer").get("access_token")
-    except Exception as e:
-      twoStepVerificationChallengeUrl = self.__getTwoStepVerificationChallengeUrl(response)
+    except Exception:
+      twoStepVerificationChallengeUrl = __getTwoStepVerificationChallengeUrl(response)
       print("Unable to authenticate to Amazon Flex.")
       print(f"\nPlease try completing the two step verification challenge at \033[1m{twoStepVerificationChallengeUrl}\033[0m . Then try again.")
       print("\nIf you already completed the two step verification, please check your Amazon Flex username and password in the config file and try again.")
@@ -321,9 +337,6 @@ class FlexUnlimited:
   """
   Parse the verification challenge code unique to the user from the failed login attempt and return the url where they can complete the two step verification.
   """
-  def __getTwoStepVerificationChallengeUrl(self, challengeRequest: Response) -> str:
-    verificationChallengeCode: str = challengeRequest.get("response").get("challenge").get("uri").split("?")[1].split("=")[1]
-    return "https://www.amazon.com/ap/challenge?openid.return_to=https://www.amazon.com/ap/maplanding&openid.oa2.code_challenge_method=S256&openid.assoc_handle=amzn_device_ios_us&pageId=amzn_device_ios_light&accountStatusPolicy=P1&openid.claimed_id=http://specs.openid.net/auth/2.0/identifier_select&openid.mode=checkid_setup&openid.identity=http://specs.openid.net/auth/2.0/identifier_select&openid.ns.oa2=http://www.amazon.com/ap/ext/oauth/2&openid.oa2.client_id=device:30324244334531423246314134354635394236443142424234413744443936452341334e5748585451344542435a53&language=en_US&openid.ns.pape=http://specs.openid.net/extensions/pape/1.0&openid.oa2.code_challenge=n76GtDRiGSvq-Bhrez9x0CypsZFB_7eLfEDy_qZtqFk&openid.oa2.scope=device_auth_access&openid.ns=http://specs.openid.net/auth/2.0&openid.pape.max_auth_age=0&openid.oa2.response_type=code" + f"&arb={verificationChallengeCode}"
 
   @staticmethod
   def __getAmzDate() -> str:
@@ -332,33 +345,33 @@ class FlexUnlimited:
         """
     return datetime.utcnow().strftime('%Y%m%dT%H%M%SZ')
 
-  def __getEligibleServiceAreas(self):
+  def __getEligibleServiceAreas(self, z=None):
     self.__requestHeaders["X-Amz-Date"] = FlexUnlimited.__getAmzDate()
-    response = self.session.get(
+    self.session.get(
       FlexUnlimited.routes.get("GetEligibleServiceAreas"),
       headers=self.__requestHeaders)
-    if response.status_code == 403:
+    if z.status_code == 403:
       self.__getFlexAccessToken()
-      response = self.session.get(
+      z = self.session.get(
         FlexUnlimited.routes.get("GetEligibleServiceAreas"),
         headers=self.__requestHeaders
       )
-    return response.json().get("serviceAreaIds")
+    return z.json().get("serviceAreaIds")
 
   def getAllServiceAreas(self):
     self.__requestHeaders["X-Amz-Date"] = FlexUnlimited.__getAmzDate()
-    response = self.session.get(
+    x = self.session.get(
       FlexUnlimited.routes.get("GetOfferFiltersOptions"),
       headers=self.__requestHeaders
       )
-    if response.status_code == 403:
+    if x.status_code == 403:
       self.__getFlexAccessToken()
-      response = self.session.get(
+      x = self.session.get(
         FlexUnlimited.routes.get("GetOfferFiltersOptions"),
         headers=self.__requestHeaders
       )
 
-    serviceAreaPoolList = response.json().get("serviceAreaPoolList")
+    serviceAreaPoolList = x.json().get("serviceAreaPoolList")
     serviceAreasTable = PrettyTable()
     serviceAreasTable.field_names = ["Service Area Name", "Service Area ID"]
     for serviceArea in serviceAreaPoolList:
@@ -372,17 +385,17 @@ class FlexUnlimited:
     Returns:
     Offers response object
     """
-    response = self.session.post(
+    c = self.session.post(
       FlexUnlimited.routes.get("GetOffers"),
       headers=self.__requestHeaders,
       json=self.__offersRequestBody)
-    if response.status_code == 403:
+    if c.status_code == 403:
       self.__getFlexAccessToken()
-      response = self.session.post(
+      c = self.session.post(
         FlexUnlimited.routes.get("GetOffers"),
         headers=self.__requestHeaders,
         json=self.__offersRequestBody)
-    return response
+    return c
 
   def __acceptOffer(self, offer: Offer):
     self.__requestHeaders["X-Amz-Date"] = self.__getAmzDate()
@@ -427,7 +440,7 @@ class FlexUnlimited:
         return
 
     if self.arrivalBuffer:
-      deltaTime = (offer.expirationDate - datetime.now()).seconds / 60
+      deltaTime = (offer.startTime - datetime.now()).seconds / 60
       if deltaTime < self.arrivalBuffer:
         return
 
